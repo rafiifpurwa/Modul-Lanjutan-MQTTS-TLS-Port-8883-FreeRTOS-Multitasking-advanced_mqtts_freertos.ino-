@@ -1,0 +1,67 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+
+// 3 Sertifikat Utama untuk mTLS (AWS IoT Core / Broker Aman)
+const char* root_ca = \
+"-----BEGIN CERTIFICATE-----\n" \
+"ISI_ROOT_CA_CERTIFICATE_DI_SINI\n" \
+"-----END CERTIFICATE-----\n";
+
+const char* device_cert = \
+"-----BEGIN CERTIFICATE-----\n" \
+"ISI_DEVICE_CERTIFICATE_X509_DI_SINI\n" \
+"-----END CERTIFICATE-----\n";
+
+const char* private_key = \
+"-----BEGIN RSA PRIVATE KEY-----\n" \
+"ISI_PRIVATE_KEY_PERANGKAT_DI_SINI\n" \
+"-----END RSA PRIVATE KEY-----\n";
+
+WiFiClientSecure secureClient;
+PubSubClient mqttSecure(secureClient);
+
+// Mutex untuk mencegah Race Condition saat akses variabel bersama antar Core
+SemaphoreHandle_t dataMutex;
+float sharedSensorData = 0.0;
+
+// Task 1: Berjalan di Core 0 khusus untuk menjaga jaringan & MQTT
+void TaskNetworkCode(void * pvParameters) {
+  for (;;) {
+    if (mqttSecure.connected()) {
+      mqttSecure.loop();
+    }
+    vTaskDelay(10 / portTICK_PERIOD_MS); // Beri jeda 10ms untuk Watchdog Timer
+  }
+}
+
+// Task 2: Berjalan di Core 1 khusus untuk membaca sensor secara periodik
+void TaskSensorCode(void * pvParameters) {
+  for (;;) {
+    if (xSemaphoreTake(dataMutex, portMAX_DELAY) == pdTRUE) {
+      sharedSensorData += 0.5; // Simulasi update sensor aman dari race condition
+      xSemaphoreGive(dataMutex);
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS); // Delay non-blocking RTOS 1 detik
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Konfigurasi Sertifikat mTLS pada WiFiClientSecure
+  secureClient.setCACert(root_ca);
+  secureClient.setCertificate(device_cert);
+  secureClient.setPrivateKey(private_key);
+  mqttSecure.setServer("alamat-broker-aman.amazonaws.com", 8883); // Port standar MQTTS = 8883
+
+  dataMutex = xSemaphoreCreateMutex();
+
+  // Alokasikan Task ke Core 0 dan Core 1
+  xTaskCreatePinnedToCore(TaskNetworkCode, "NetworkTask", 10000, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(TaskSensorCode,  "SensorTask",  10000, NULL, 1, NULL, 1);
+}
+
+void loop() {
+  // Kosongkan loop() jika seluruh pekerjaan sudah ditangani oleh Task FreeRTOS
+}
